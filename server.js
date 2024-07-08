@@ -4,8 +4,20 @@ const ytdl = require("ytdl-core");
 const axios = require("axios");
 const search = require("youtube-search");
 const dotenv = require("dotenv");
+const OpenAI = require("openai");
+const sanitize = require("sanitize-filename");
+const fs = require("fs");
+const ffmpeg = require("fluent-ffmpeg");
+const path = require("path");
+// const pathToFfmpeg = require("ffmpeg-static"); // Uncomment if using ffmpeg-static
+const FormData = require("form-data");
 
 dotenv.config();
+
+// Uncomment if using ffmpeg-static and set the path manually
+// ffmpeg.setFfmpegPath(pathToFfmpeg);
+
+const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY})
 
 const opts = {
   maxResults: 1,
@@ -23,9 +35,7 @@ async function getAccessToken() {
       Authorization:
         "Basic " +
         Buffer.from(
-          process.env.SPOTIFY_CLIENT_ID +
-            ":" +
-            process.env.SPOTIFY_CLIENT_SECRET
+          process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET
         ).toString("base64"),
       "Content-Type": "application/x-www-form-urlencoded",
     },
@@ -87,33 +97,62 @@ async function fetchYTUrl(query) {
   });
 }
 
+async function getSongRecommendation(description) {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4",
+    messages: [
+      {
+        role: "system",
+        content: "You are a helpful assistant. The user gives you a text description of a video, you give a suitable song that will go well with the vibe of the video, the format of which is songName, artistName. give nothing other than this",
+      },
+      {
+        role: "user",
+        content: description,
+      },
+    ],
+  });
+
+  const response = completion.choices[0].message.content;
+  console.log(response)
+  return response;
+}
+
 app.get("/download", async (req, res) => {
-  const query = req.query.query;
+  const description = req.query.description;
 
   try {
-    const songInfo = await searchSpotify(query);
-    const videoUrl = await fetchYTUrl(`${songInfo.items[0].name} ${songInfo.items[0].artists[0].name} audio`);
+    let songRecommendation = await getSongRecommendation(description);
 
-  console.log(`${songInfo.items[0].name} ${songInfo.items[0].artists[0].name} audio`);
+    let songInfo = await searchSpotify(`${songRecommendation}`);
+    console.log(songInfo.items[0])
+    let videoUrl = await fetchYTUrl(`${songInfo.items[0].name} ${songInfo.items[0].artists[0].name} audio`);
+    console.log(videoUrl)
 
     if (!videoUrl) {
       throw new Error("No YouTube video found");
     }
 
-    const videoInfo = await ytdl.getInfo(videoUrl);
-    const audioFormats = ytdl.filterFormats(videoInfo.formats, "audioonly");
+    const outputFilePath = path.resolve(__dirname, 'output.mp3');
 
-    if (audioFormats.length > 0) {
-      const response = {
-        name: songInfo.items[0].name,
-        image: songInfo.items[0].album.images[0].url,
-        artist: songInfo.items[0].artists[0].name,
-        mp3Link: audioFormats[0].url,
-      };
-      res.json(response);
-    } else {
-      res.status(404).json({ error: "No audio formats found" });
-    }
+    const stream = ytdl(videoUrl, { filter: 'audioonly' });
+
+    ffmpeg(stream)
+      .audioBitrate(128)
+      .save(outputFilePath)
+      .on('end', () => {
+        res.download(outputFilePath, `${songInfo.items[0].name}.mp3`, (err) => {
+          if (err) {
+            console.error("Error downloading file:", err.message);
+            res.status(500).json({ error: "Failed to download MP3 file" });
+          } else {
+            fs.unlinkSync(outputFilePath); // Clean up the file after download
+          }
+        });
+      })
+      .on('error', (err) => {
+        console.error("Error during conversion:", err.message);
+        res.status(500).json({ error: "Failed to convert YouTube video to MP3" });
+      });
   } catch (error) {
     console.error("Error occurred:", error.message);
     res.status(500).json({ error: error.message });
