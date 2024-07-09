@@ -9,15 +9,13 @@ const sanitize = require("sanitize-filename");
 const fs = require("fs");
 const ffmpeg = require("fluent-ffmpeg");
 const path = require("path");
-// const pathToFfmpeg = require("ffmpeg-static"); // Uncomment if using ffmpeg-static
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const FormData = require("form-data");
 
 dotenv.config();
+ffmpeg.setFfmpegPath(ffmpegPath);
 
-// Uncomment if using ffmpeg-static and set the path manually
-// ffmpeg.setFfmpegPath(pathToFfmpeg);
-
-const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY})
+const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY});
 
 const opts = {
   maxResults: 1,
@@ -113,7 +111,7 @@ async function getSongRecommendation(description) {
   });
 
   const response = completion.choices[0].message.content;
-  console.log(response)
+  console.log(response);
   return response;
 }
 
@@ -124,35 +122,54 @@ app.get("/download", async (req, res) => {
     let songRecommendation = await getSongRecommendation(description);
 
     let songInfo = await searchSpotify(`${songRecommendation}`);
-    console.log(songInfo.items[0])
+    console.log(songInfo.items[0]);
     let videoUrl = await fetchYTUrl(`${songInfo.items[0].name} ${songInfo.items[0].artists[0].name} audio`);
-    console.log(videoUrl)
+    console.log(videoUrl);
 
     if (!videoUrl) {
       throw new Error("No YouTube video found");
     }
 
-    const outputFilePath = path.resolve(__dirname, 'output.mp3');
+    const outputFilePath = path.resolve(__dirname, `${songInfo.items[0].name}.mp3`);
+    console.log(__dirname);
+    console.log(outputFilePath);
 
     const stream = ytdl(videoUrl, { filter: 'audioonly' });
+    var fileUrl = "";
 
     ffmpeg(stream)
       .audioBitrate(128)
       .save(outputFilePath)
       .on('end', () => {
-        res.download(outputFilePath, `${songInfo.items[0].name}.mp3`, (err) => {
-          if (err) {
-            console.error("Error downloading file:", err.message);
-            res.status(500).json({ error: "Failed to download MP3 file" });
-          } else {
-            fs.unlinkSync(outputFilePath); // Clean up the file after download
-          }
+        const formData = new FormData();
+        formData.append('file', fs.createReadStream(outputFilePath));
+
+        axios.post('https://kodan-api-5955c011e5ae.herokuapp.com/uploadFile', formData, {
+          headers: formData.getHeaders(),
+        }).then((response) => {
+          console.log("File uploaded successfully:", response.data);
+          fileUrl = response.data.fileUrl;
+
+          const responseData = {
+            songName: songInfo.items[0].name,
+            artistName: songInfo.items[0].artists[0].name,
+            imageUrl: songInfo.items[0].album.images[0].url,
+            fileUrl: fileUrl
+          };
+          
+          res.send(responseData); 
+        }).catch((error) => {
+          console.error("Error uploading file:", error.message);
+          res.status(500).json({ error: "Failed to upload file to CDN" });
+        }).finally(() => {
+          fs.unlinkSync(outputFilePath);
         });
       })
       .on('error', (err) => {
         console.error("Error during conversion:", err.message);
         res.status(500).json({ error: "Failed to convert YouTube video to MP3" });
       });
+
   } catch (error) {
     console.error("Error occurred:", error.message);
     res.status(500).json({ error: error.message });
